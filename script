@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-# vim: set ft=bash
-
-readonly A="══"
-readonly B="──"
-readonly C="┄┄"
-readonly S=" "
-readonly E=" "
