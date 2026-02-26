@@ -5,24 +5,25 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-# shellcheck disable=SC2034
-{
-  SCRIPT_DIR=$(dirname "$(readlink --canonicalize-existing "${0}" 2>/dev/null)")
-  readonly SCRIPT="${0##*/}"
-  readonly SCRIPT_PATH="${SCRIPT_DIR}/${SCRIPT}"
+SCRIPT_DIR=$(dirname "$(readlink --canonicalize-existing "${0}" 2>/dev/null)")
+readonly SCRIPT="${0##*/}"
+readonly SCRIPT_PATH="${SCRIPT_DIR}/${SCRIPT}"
+if [[ "${SCRIPT}" == *.sh ]]; then
+  readonly SCRIPT_BASENAME="${SCRIPT%.sh}"
+else
+  readonly SCRIPT_BASENAME="${SCRIPT}"
+fi
+readonly SCRIPT_LIB="${SCRIPT_BASENAME}-lib.sh"
+readonly SCRIPT_LIB_PATH="${SCRIPT_DIR}/${SCRIPT_LIB}"
 
-  readonly A="══"
-  readonly B="──"
-  readonly C="┄┄"
-  readonly S=" "
-  readonly E=" "
-  readonly NL="
-"
+# shellcheck disable=SC1090
+source "${SCRIPT_LIB_PATH}"
+# After sourcing script-lib.sh and calling init_common_state, we have:
+# - readonly log decorators (non-color prefixes): A, B, C, S, E, NL
+# - OPTIONS associative array initialized as: dry_run=0, verbose=0
+init_common_state
 
-  declare -A OPTIONS
-  OPTIONS["dry_run"]=0
-  OPTIONS["verbose"]=0
-}
+readonly SCRIPT_DESCRIPTION="A template bash script to be used to create new bash scripts."
 
 declare -A SCRIPT_ARGS
 declare -A EXAMPLES
@@ -63,177 +64,75 @@ SCRIPT_ARGS["c:"]="copy-to; ='path'; Copy this script to the given 'path'"
 readonly SCRIPT_ARGS
 readonly EXAMPLES
 
-function strip_trailing_colon {
-  printf '%s' "${1%%:}"
-}
-
-function strip_trailing_double_colon {
-  printf '%s' "${1%%::}"
-}
-
-function trim_leading_ws {
-  printf '%s' "${1#"${1%%[![:space:]]*}"}"
-}
-
-function expand_tilde {
-  if [[ ! "${HOME-}" ]]; then
-    # We want to abort here actually
-    true
-  fi
-  printf '%s' "${1/#~/${HOME}}"
-}
-
-declare HELP_EXPANDED_STR=""
-declare EXAMPLES_STR=""
-declare QUICK_HELP_ARGS_STR=""
-declare SHORT_FLAGS=""
-declare LONG_FLAGS=""
-function construct_help_str_and_flags {
-  local long_sep=","
-  local long_count=0
-  for key in "${!SCRIPT_ARGS[@]}"; do
-
-    long_sep=","
-    if [[ ${long_count} -eq 0 ]]; then
-      long_sep=""
-    fi
-
-    local value="${SCRIPT_ARGS[${key}]}"
-    declare -a values
-    # size 1, 2 or 3
-    IFS=';' read -r -a values <<<"${value}"
-
-    # append to '--options' flag for 'getopt'
-    SHORT_FLAGS+="${key}"
-
-    local long_flag_suffix=""
-
-    local short_flag_str
-    if [[ $key == *:: ]]; then
-      short_flag_str="-$(strip_trailing_double_colon "${key}")"
-      long_flag_suffix="::"
-    elif [[ $key == *: ]]; then
-      short_flag_str="-$(strip_trailing_colon "${key}")"
-      long_flag_suffix=":"
-    else
-      short_flag_str="-${key}"
-    fi
-
-    local long_flag_str=""
-    local opt_arg=""
-    local help_text=""
-    local short_long_sep=""
-
-    if [[ ${#values[@]} -eq 1 ]]; then
-      # Size 1 means we have no long flag
-
-      help_text="$(trim_leading_ws "${values[*]}")"
-      QUICK_HELP_ARGS_STR+="${short_flag_str} "
-
-    elif [[ ${#values[@]} -eq 2 ]]; then
-      # Size 2 means we have a long flag, but no argument
-
-      # append optional ',' and the short flag to show in help args
-      long_flag_str="--${values[0]}"
-      help_text="$(trim_leading_ws "${values[*]:1}")"
-      QUICK_HELP_ARGS_STR+="${short_flag_str}/${long_flag_str} "
-      LONG_FLAGS+="${long_sep}${values[0]}${long_flag_suffix}"
-      short_long_sep=","
-      long_count=$((long_count + 1))
-
-    else
-      # size 3 (or more) means we have a along flag and an (optional) argument
-
-      opt_arg="$(trim_leading_ws "${values[1]}")"
-      long_flag_str="--${values[0]}${opt_arg}"
-      help_text="$(trim_leading_ws "${values[*]:2}")"
-      QUICK_HELP_ARGS_STR+="${short_flag_str}/${long_flag_str} "
-      LONG_FLAGS+="${long_sep}${values[0]}${long_flag_suffix}"
-      short_long_sep=","
-      long_count=$((long_count + 1))
-
-    fi
-
-    HELP_EXPANDED_STR+="  ${short_flag_str}${short_long_sep} ${long_flag_str}${NL}        ${help_text}${NL}"
-  done
-
-  for ex in "${!EXAMPLES[@]}"; do
-    EXAMPLES_STR+="${EXAMPLES[${ex}]}"
-  done
-}
+# Builds parser/help globals from SCRIPT_ARGS/EXAMPLES:
+# - SHORT_FLAGS, LONG_FLAGS (used by getopt inside script-lib.sh:parse_options_with_handler)
+# - QUICK_HELP_ARGS_STR, HELP_EXPANDED_STR, EXAMPLES_STR (used by usage output)
 construct_help_str_and_flags
 readonly HELP_EXPANDED_STR
 readonly EXAMPLES_STR
 
 function usage {
+  # Renders usage text using SCRIPT, QUICK_HELP_ARGS_STR, HELP_EXPANDED_STR, EXAMPLES_STR.
+  print_usage "${SCRIPT_DESCRIPTION}"
+}
 
-  cat <<USAGE_EOF
-Usage:
-    ${SCRIPT} ${QUICK_HELP_ARGS_STR}
+declare DATE_ARG=0
+declare DATE_FORMAT=""
+declare GREETING_ARG=""
+declare COPY_ARG=""
+declare HELP_ARG=0
 
-Description:
-    A template bash script to be used to create new bash scripts.
-
-Options:
-${HELP_EXPANDED_STR}
-Examples:
-${EXAMPLES_STR}
-USAGE_EOF
+function handle_option_cb {
+  case "${1}" in
+  -d | --date)
+    DATE_ARG=1
+    if [[ -n "${2:-}" ]]; then
+      DATE_FORMAT="${2}"
+      PARSE_SHIFT=2
+    else
+      PARSE_SHIFT=1
+    fi
+    ;;
+  -c | --copy-to)
+    COPY_ARG="${2}"
+    PARSE_SHIFT=2
+    ;;
+  -g | --greeting)
+    GREETING_ARG="${2}"
+    PARSE_SHIFT=2
+    ;;
+  -v)
+    OPTIONS["verbose"]=1
+    PARSE_SHIFT=1
+    ;;
+  -n | --dry-run)
+    OPTIONS["dry_run"]=1
+    PARSE_SHIFT=1
+    ;;
+  -h | --help)
+    HELP_ARG=1
+    PARSE_SHIFT=1
+    ;;
+  *)
+    log_e "unknown option '${1}'"
+    PARSE_SHIFT=1
+    ;;
+  esac
 }
 
 function main {
   local -r args=("${@}")
 
-  local opts
-  opts=$(getopt \
-    --options "${SHORT_FLAGS}" \
-    --longoptions "${LONG_FLAGS}" \
-    -- "${args[@]}")
-
-  if [[ $? -ne 0 ]]; then
-    echo "${E} failed to parse some arguments" >&2
-    usage
-    exit 1
-  fi
-
-  eval set -- "${opts}"
-
-  while true; do
-    case "${1}" in
-    -d | --date)
-      local -r date_arg=1
-      if [[ -n "${2:-}" ]]; then
-        local -r date_format="${2}"
-        shift 2
-      else
-        shift
-      fi
-      ;;
-    -c | --copy-to)
-      local -r copy_arg="${2}"
-      shift 2
-      ;;
-    -v)
-      OPTIONS["verbose"]=1
-      shift
-      ;;
-    -n | --dry-run)
-      OPTIONS["dry_run"]=1
-      shift
-      ;;
-    -h | --help)
-      local -r help_arg=1
-      shift
-      ;;
-    --)
-      shift
-      break
-      ;;
-    *)
-      break
-      ;;
-    esac
-  done
+  DATE_ARG=0
+  DATE_FORMAT=""
+  GREETING_ARG=""
+  COPY_ARG=""
+  HELP_ARG=0
+  # Parses args and dispatches each option to handle_option_cb.
+  # Sets shared globals:
+  # - REMAINING_ARGS: positional args left after option parsing
+  # - PARSE_SHIFT: per-option shift value consumed by parser internals
+  parse_options_with_handler "handle_option_cb" "${args[@]}"
 
   if ((OPTIONS["dry_run"])); then
     echo "${B} Dry run output wanted"
@@ -243,16 +142,20 @@ function main {
     echo "${B} verbose output wanted"
   fi
 
-  ((OPTIONS["verbose"])) && echo "${B} Remaining args = ${*}"
-  if [[ ${date_arg-} ]]; then
-    do_date "${date_format-}"
+  ((OPTIONS["verbose"])) && echo "${B} Remaining args = ${REMAINING_ARGS[*]}"
+  if ((DATE_ARG)); then
+    do_date "${DATE_FORMAT}"
   fi
 
-  if [[ ${copy_arg-} ]]; then
-    do_copy_to "${copy_arg}"
+  if [[ -n "${GREETING_ARG}" ]]; then
+    do_greeting "${GREETING_ARG}"
   fi
 
-  if [[ ${help_arg-} ]]; then
+  if [[ -n "${COPY_ARG}" ]]; then
+    do_copy_to "${COPY_ARG}"
+  fi
+
+  if ((HELP_ARG)); then
     usage
     exit
   fi
@@ -270,29 +173,56 @@ function do_date {
   fi
 }
 
+function do_greeting {
+  local -r greeting_word="${1}"
+  echo "${S}${greeting_word}"
+}
+
 function do_copy_to {
   local copy_to="${1}"
   echo "${B} Copying '${SCRIPT_PATH}' to '${copy_to}'"
 
+  # Expands leading '~' to HOME.
   local -r dest="$(expand_tilde "${copy_to}")"
 
-  local dest_file
-  if [[ -d "${dest}" && -f "${dest}/${SCRIPT}" ]]; then
-    dest_file="${dest}/${SCRIPT}"
-  else
-    dest_file="${dest}"
+  if [[ -d "${dest}" ]]; then
+    echo "${E} '${copy_to}' is a directory. Provide a destination file path."
+    return 1
   fi
+
+  local -r dest_file="${dest}"
+  local -r dest_dir="$(dirname "${dest_file}")"
+  local -r dest_script_name="${dest_file##*/}"
+  local dest_script_basename
+  if [[ "${dest_script_name}" == *.sh ]]; then
+    dest_script_basename="${dest_script_name%.sh}"
+  else
+    dest_script_basename="${dest_script_name}"
+  fi
+  local -r dest_lib_file="${dest_dir}/${dest_script_basename}-lib.sh"
 
   ((OPTIONS["verbose"])) && echo "${C} Copying '${SCRIPT_PATH}' to '${dest_file}'"
 
-  if [[ -d "${dest}" && -f "${dest_file}" ]]; then
-    echo "${E} '${copy_to}' already contains '${SCRIPT}'."
-  elif [[ -f "${dest_file}" ]]; then
+  if [[ ! -d "${dest_dir}" ]]; then
+    echo "${E} destination directory '${dest_dir}' does not exist."
+    return 1
+  elif [[ -e "${dest_file}" ]]; then
     echo "${E} '${copy_to}' already exists."
+    return 1
+  elif [[ -e "${dest_lib_file}" ]]; then
+    echo "${E} destination library '${dest_lib_file}' already exists."
+    return 1
+  elif [[ ! -f "${SCRIPT_LIB_PATH}" ]]; then
+    echo "${E} missing library '${SCRIPT_LIB_PATH}'"
+    return 1
   else
     if ! ((OPTIONS["dry_run"])); then
       cp "${SCRIPT_PATH}" "${dest_file}"
       echo "# created by copying ${SCRIPT_PATH} on $(date --utc +'%Y%m%d_%H%M%S')" >>"${dest_file}"
+
+      echo "${B} Copying '${SCRIPT_LIB_PATH}' to '${dest_lib_file}'"
+      cp "${SCRIPT_LIB_PATH}" "${dest_lib_file}"
+      echo "# created by copying ${SCRIPT_LIB_PATH} on $(date --utc +'%Y%m%d_%H%M%S')" >>"${dest_lib_file}"
     fi
   fi
 
